@@ -8,6 +8,7 @@ import (
 
 	"github.com/beevik/ntp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -175,8 +176,55 @@ func TestNTPTimeSource(t *testing.T) {
 				timeQuery:       tc.query,
 			}
 			assert.WithinDuration(t, time.Now(), source.Now(), clockCompareDelta)
-			source.updateOffset()
+			err := source.updateOffset()
+			if tc.expectError {
+				assert.Equal(t, errUpdateOffset, err)
+			} else {
+				assert.NoError(t, err)
+			}
 			assert.WithinDuration(t, time.Now().Add(tc.expected), source.Now(), clockCompareDelta)
 		})
 	}
+}
+
+func TestRunningPeriodically(t *testing.T) {
+	tc := newTestCases()[0]
+	maxHits := 3
+	minHits := 1
+
+	t.Run(tc.description, func(t *testing.T) {
+		source := &NTPTimeSource{
+			servers:           tc.servers,
+			allowedFailures:   tc.allowedFailures,
+			timeQuery:         tc.query,
+			fastNTPSyncPeriod: time.Duration(maxHits*10) * time.Millisecond,
+			slowNTPSyncPeriod: time.Duration(minHits*10) * time.Millisecond,
+		}
+
+		hits := 0
+		var startingTime time.Time
+		var endingTime time.Time
+
+		err := source.runPeriodically(func() error {
+			hits++
+			if hits == 1 {
+				startingTime = time.Now()
+				return errUpdateOffset
+			} else if hits < 3 {
+				return errUpdateOffset
+			} else if hits == 6 {
+				endingTime = time.Now()
+				source.wg.Done()
+			}
+			return nil
+		})
+		source.wg.Wait()
+		require.NoError(t, err)
+
+		minExpected := (2 * maxHits) + (3 * minHits)
+		maxExpected := minExpected + 1
+		actual := int(endingTime.Sub(startingTime).Seconds() * 100)
+
+		require.True(t, (actual >= minExpected && actual <= maxExpected))
+	})
 }
